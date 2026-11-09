@@ -1,7 +1,6 @@
 
 import os
 import time
-import math
 import html
 from pathlib import Path
 
@@ -280,8 +279,6 @@ def build_public_data():
 
     cache_map = get_cache_map()
 
-    # 원본에 이미 좌표가 있다면 우선 사용하고,
-    # 없는 좌표는 캐시에서 가져옵니다.
     if "위도" in source.columns:
         source["위도"] = pd.to_numeric(source["위도"], errors="coerce")
     else:
@@ -307,7 +304,8 @@ def build_public_data():
     if result.empty:
         return result, "유효한 좌표가 없습니다. 캐시 파일의 주소와 좌표 열을 확인해 주세요."
 
-    # 최종 파일을 만들어 GitHub에 올릴 수 있게 합니다.
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+
     result.to_csv(
         PUBLIC_COORD_FILE,
         index=False,
@@ -318,12 +316,9 @@ def build_public_data():
 
 
 def load_map_data():
-    # 원본과 캐시가 있으면 항상 다시 결합합니다.
-    # 오래되었거나 비어 있는 최종 CSV에 의존하지 않습니다.
     if SOURCE_FILE.exists() and CACHE_FILE.exists():
         return build_public_data()
 
-    # 캐시가 없더라도 기존 최종 좌표 파일은 사용할 수 있습니다.
     public = load_csv(PUBLIC_COORD_FILE)
 
     if public is not None:
@@ -504,7 +499,6 @@ if public_df.empty:
     st.error(load_error or "지도에 표시할 좌표 데이터가 없습니다.")
     st.info("관리자 메뉴에서 캐시 파일을 확인해 주세요.")
 
-# 필요한 열 찾기
 address_col = find_col(
     public_df,
     ["소재지도로명주소", "도로명주소", "소재지지번주소", "지번주소"],
@@ -554,26 +548,35 @@ with c3:
 
 user_lat = None
 user_lon = None
+has_user_location = False
 
 try:
     location_data = streamlit_geolocation()
 
     if isinstance(location_data, dict):
-        if location_data.get("latitude") is not None:
-            user_lat = float(location_data["latitude"])
+        raw_lat = location_data.get("latitude")
+        raw_lon = location_data.get("longitude")
 
-        if location_data.get("longitude") is not None:
-            user_lon = float(location_data["longitude"])
+        if raw_lat is not None and raw_lon is not None:
+            user_lat = float(raw_lat)
+            user_lon = float(raw_lon)
+
+            has_user_location = (
+                -90 <= user_lat <= 90
+                and -180 <= user_lon <= 180
+            )
 
 except Exception:
-    pass
+    has_user_location = False
 
-if user_lat is None or user_lon is None:
-    user_lat = DEFAULT_LAT
-    user_lon = DEFAULT_LON
-    location_label = "강남역 기본 위치"
-else:
+if has_user_location:
     location_label = "현재 위치"
+    center_lat = user_lat
+    center_lon = user_lon
+else:
+    location_label = "강남역 기본 위치"
+    center_lat = DEFAULT_LAT
+    center_lon = DEFAULT_LON
 
 
 # ============================================================
@@ -602,10 +605,6 @@ with button_col:
     )
 
 filtered = public_df.copy()
-
-center_lat = user_lat
-center_lon = user_lon
-
 search_message = ""
 
 if not public_df.empty and search_query.strip():
@@ -695,9 +694,40 @@ map_obj = folium.Map(
     tiles="OpenStreetMap",
 )
 
+# ------------------------------------------------------------
+# 현재 위치 파란색 마커
+# ------------------------------------------------------------
+
+if has_user_location:
+
+    folium.Marker(
+        location=[user_lat, user_lon],
+        tooltip="내 현재 위치",
+        popup="📍 내 현재 위치",
+        icon=folium.Icon(
+            color="blue",
+            icon="user",
+            prefix="fa",
+        ),
+    ).add_to(map_obj)
+
+    folium.Circle(
+        location=[user_lat, user_lon],
+        radius=100,
+        color="#2878E5",
+        fill=True,
+        fill_color="#2878E5",
+        fill_opacity=0.15,
+        weight=2,
+    ).add_to(map_obj)
+
+
+# ------------------------------------------------------------
+# 공중화장실 마커
+# ------------------------------------------------------------
+
 if not filtered.empty:
 
-    # 한 화면에 너무 많은 마커가 표시되는 것을 방지
     map_rows = filtered.head(2500)
 
     for _, row in map_rows.iterrows():
@@ -738,12 +768,7 @@ if not filtered.empty:
         )
 
 else:
-    folium.Marker(
-        [center_lat, center_lon],
-        tooltip="기본 위치",
-        popup="검색 결과가 없습니다.",
-        icon=folium.Icon(color="blue"),
-    ).add_to(map_obj)
+    st.info("검색 결과가 없습니다.")
 
 st_folium(
     map_obj,
@@ -876,7 +901,7 @@ with st.expander(
                     f"새로 변환할 주소: **{len(unique_addresses) - done_count:,}개**"
                 )
 
-                # 좌표 재결합 버튼
+                # 기존 캐시 재결합
                 if st.button(
                     "기존 캐시로 최종 좌표 파일 다시 만들기",
                     use_container_width=True,
@@ -971,7 +996,6 @@ with st.expander(
                                     f"· 이번 실행 성공: {success_count:,}개"
                                 )
 
-                            # 100개마다 캐시 저장
                             if idx % 100 == 0:
 
                                 partial = pd.DataFrame([
@@ -1009,7 +1033,6 @@ with st.expander(
                             encoding="utf-8-sig",
                         )
 
-                        # 최종 좌표 파일 재생성
                         result, build_error = build_public_data()
 
                         if build_error:
@@ -1052,7 +1075,7 @@ with st.expander(
 
                 st.divider()
 
-                # 현재 데이터 다운로드
+                # 데이터 다운로드
                 if PUBLIC_COORD_FILE.exists():
 
                     with open(PUBLIC_COORD_FILE, "rb") as f:
